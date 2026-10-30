@@ -107,6 +107,7 @@ Claude를 **완전히 종료**(작업 표시줄 트레이 아이콘에서 종료
 
 | 하고 싶은 일 | 방법 |
 |---|---|
+| **새 버전으로 업데이트** | ① 이 페이지에서 ZIP을 새로 받아, 쓰던 폴더에 **덮어쓰기**합니다 (`data` 폴더는 그대로 두면 판례를 다시 받지 않아도 됨) ② `install.bat` 을 다시 실행하고, "최신으로 다시 받을까요?"에는 Enter(=아니오) ③ Claude 다시 켜기. 새로 생긴 API가 있으면 아래 [변경 이력](#변경-이력)을 보고 공공데이터포털에서 활용신청을 추가로 합니다 |
 | 판례를 최신으로 | Claude에게 "판례 보관본 업데이트해 줘"라고 하거나 `install.bat` 을 다시 실행 |
 | 인증키 바꾸기 | `install.bat` 을 다시 실행해 "그대로 쓸까요?"에 `n` |
 | 삭제 | ① Claude 데스크톱 앱: `%APPDATA%\Claude\claude_desktop_config.json` 에서 `comwel` 항목 삭제 ② Claude Code: `claude mcp remove comwel --scope user` ③ 폴더 삭제 ④ (선택) 사용자 환경변수 `DATA_GO_KR_KEY` 삭제 |
@@ -139,7 +140,7 @@ Claude 데스크톱 앱은 `~/Library/Application Support/Claude/claude_desktop_
 install.bat / install.ps1   Windows 설치 파일
 src/server.py               MCP 서버(도구 정의)
 src/api_client.py           공단 API 호출 (인증키: 환경변수 → Windows 사용자 환경변수 순으로 읽음)
-src/store.py                SQLite 보관본(판례 전체, 검색해 본 판정서)
+src/store.py                SQLite 보관본(판례 전체, 검색해 본 질병판정서·심사결정서)
 src/search.py               검색어 해석·발췌·인용 대조
 src/sync_precedents.py      판례 전체 내려받기
 src/check_key.py            인증키 확인
@@ -151,7 +152,19 @@ py -X utf8 -m pytest tests/ -v      # 단위 테스트(인터넷 불필요)
 py -X utf8 tests/live_check.py      # 실제 서버·실제 MCP 연결 점검(인증키 필요)
 ```
 
+## 변경 이력
+
+| 날짜 | 내용 | 기존 사용자가 할 일 |
+|---|---|---|
+| 2026. 10. 30. | **심사결정서(산재 심사청구) 검색 추가** — `search_review_decisions`, `get_review_decision` | 공공데이터포털에서 [심사결정서 조회 서비스](https://www.data.go.kr/data/15110818/openapi.do) **활용신청** 후 [새 버전으로 업데이트](#관리) |
+| 2026. 10. 30. | 첫 공개 — 질병판정서·산재 판례 검색, 인용 대조, Windows 설치 파일 | — |
+
 ## 출처·라이선스
 
-- 자료 출처: 근로복지공단, 공공데이터포털 「질병판정서 조회 서비스」·「산재보험 판례 판결문 조회 서비스」 (이용허락범위 제한 없음)
+| 자료 (근로복지공단, 공공데이터포털) | 이용허락범위 |
+|---|---|
+| [질병판정서 조회 서비스](https://www.data.go.kr/data/15110836/openapi.do) | 제한 없음 |
+| [심사결정서 조회 서비스](https://www.data.go.kr/data/15110818/openapi.do) | 제한 없음 |
+| [산재보험 판례 판결문 조회 서비스](https://www.data.go.kr/data/15041878/openapi.do) | 공공누리 제1유형(출처표시) — 이 도구는 검색 결과마다 출처를 표시합니다 |
+
 - 프로그램: [MIT License](LICENSE)
