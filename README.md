@@ -173,6 +173,7 @@ data/comwel.sqlite          보관본(저장소에는 올리지 않음)
 ```
 
 ```bash
+py -m pip install -r requirements-dev.txt   # 개발용 패키지(pytest)
 py -X utf8 -m pytest tests/ -v      # 단위 테스트(인터넷 불필요)
 py -X utf8 tests/live_check.py      # 실제 서버·실제 MCP 연결 점검(인증키 필요)
 ```

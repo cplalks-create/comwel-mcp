@@ -50,10 +50,14 @@ def main() -> int:
     """명령줄 실행 진입점."""
     store = Store()
     try:
-        info = sync_precedents(
-            ComwelClient(), store,
-            progress=lambda p, n: print(f"\r판례 내려받는 중 {p}/{n}쪽", end="", file=sys.stderr),
-        )
+        def progress(p: int, n: int) -> None:
+            """진행 표시. 화면(터미널)이면 한 줄을 덮어쓰고, 아니면(Claude가 실행) 5쪽마다 한 줄씩."""
+            if sys.stderr.isatty():
+                print(f"\r판례 내려받는 중 {p}/{n}쪽", end="", file=sys.stderr)
+            elif p == 1 or p % 5 == 0 or p == n:
+                print(f"판례 내려받는 중 {p}/{n}쪽", file=sys.stderr, flush=True)
+
+        info = sync_precedents(ComwelClient(), store, progress=progress)
     except ComwelApiError as exc:
         print(f"\n실패: {exc}", file=sys.stderr)
         return 1

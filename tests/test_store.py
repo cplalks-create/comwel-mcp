@@ -95,6 +95,23 @@ def test_forbidden_api_gives_clear_message(monkeypatch: pytest.MonkeyPatch) -> N
     assert len(calls) == 1
 
 
+def test_key_status_never_prints_key(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """키 상태 확인은 길이만 출력하고, 키가 없으면 NONE·종료코드 2."""
+    import check_key
+
+    monkeypatch.setattr(check_key, "load_service_key", lambda: "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+    assert check_key.key_status() == 0
+    out = capsys.readouterr().out
+    assert out.strip() == "SET len=26" and "ABC" not in out
+
+    def no_key() -> str:
+        raise ComwelApiError("없음")
+
+    monkeypatch.setattr(check_key, "load_service_key", no_key)
+    assert check_key.key_status() == 2
+    assert capsys.readouterr().out.strip() == "NONE"
+
+
 class FakeClient:
     """판례 API 흉내(쪽마다 정해진 건수)."""
 
