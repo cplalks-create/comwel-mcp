@@ -2,6 +2,7 @@
 """근로복지공단 공공데이터 API 호출 모듈.
 
 - 질병판정서 조회 서비스: apis.data.go.kr/B490001/jilbyeongPstateInfoService
+- 심사결정서 조회 서비스: apis.data.go.kr/B490001/simsaPstateInfoService
 - 산재보험 판례 판결문 조회 서비스: apis.data.go.kr/B490001/sjbPrecedentInfoService
 
 인증키는 환경변수 DATA_GO_KR_KEY 에서 읽고, 없으면 Windows 사용자 환경변수(레지스트리)에서 읽는다.
@@ -32,6 +33,29 @@ PRECEDENT_CODE_OPS = {
     "kinda": "getSjbPrecedentResultYuhyeongPstate",  # 판결결과
     "kindb": "getSjbSageonYuhyeongPstate",           # 사건유형
     "kindc": "getSjbSagoJilbyeongGubunPstate",       # 사고/질병 구분
+}
+SIMSA_BASE = "https://apis.data.go.kr/B490001/simsaPstateInfoService/"
+
+# 같은 구조(분류 3종 + 제목 검색 tq + 본문 검색 cq)를 가진 '결정서류' 서비스
+CASE_SERVICES: dict[str, dict[str, object]] = {
+    "jilbyeong": {   # 질병판정서 — 제목(title)=업종명
+        "base": JILBYEONG_BASE,
+        "codes": JILBYEONG_CODE_OPS,
+        "count": "getJilbyeongYuhyeongByCountPstate",
+        "title_op": "getJilbyeongResultEopjongPstate",
+        "content_op": "getJilbyeongResultNaeyongPstate",
+    },
+    "simsa": {       # 심사결정서 — 제목(title)=사건명
+        "base": SIMSA_BASE,
+        "codes": {
+            "kinda": "getSimsaResultYuhyeongPstate",   # 심사결과
+            "kindb": "getChungguYuhyeongPstate",       # 청구유형
+            "kindc": "getJaengjeomGubunPstate",        # 쟁점유형 구분
+        },
+        "count": "getSimsaYuhyeongByCountPstate",
+        "title_op": "getSimsaResultSageonPstate",
+        "content_op": "getSimsaResultNaeyongPstate",
+    },
 }
 
 
@@ -67,6 +91,14 @@ def _request(url: str) -> ET.Element:
                 raw = resp.read()
             root = ET.fromstring(raw)
             break
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):  # 키는 맞지만 이 API를 활용신청하지 않은 경우 등
+                raise ComwelApiError(
+                    f"접근 거부(HTTP {exc.code}): 공공데이터포털에서 이 API의 '활용신청'을 했는지 확인해 주세요. "
+                    "(신청 직후에는 반영까지 최대 1시간 걸릴 수 있습니다.)"
+                ) from exc
+            last_error = exc
+            time.sleep(1.5 * (attempt + 1))
         except (urllib.error.URLError, TimeoutError, ET.ParseError, ConnectionError) as exc:
             last_error = exc
             time.sleep(1.5 * (attempt + 1))
@@ -106,7 +138,7 @@ def _clean(params: dict[str, object]) -> dict[str, object]:
 
 
 class ComwelClient:
-    """두 API를 호출하는 클라이언트."""
+    """공단 API(질병판정서·심사결정서·판례)를 호출하는 클라이언트."""
 
     def __init__(self, service_key: str | None = None) -> None:
         """인증키를 받아 둔다(없으면 환경에서 읽음)."""
@@ -124,33 +156,49 @@ class ComwelClient:
         query = {key_param: self.key, **_clean(params)}
         return _request(base + op + "?" + urllib.parse.urlencode(query))
 
-    # ── 질병판정서 ─────────────────────────────────────────
-    def jilbyeong_codes(self, kind: str) -> list[str]:
-        """질병판정서 분류 코드 목록(kinda=심의결과, kindb=직종유형, kindc=질병구분)."""
-        root = self._call(JILBYEONG_BASE, JILBYEONG_CODE_OPS[kind], "serviceKey",
+    # ── 결정서류(질병판정서·심사결정서) ─────────────────────
+    def case_codes(self, svc: str, kind: str) -> list[str]:
+        """분류 코드 목록. svc='jilbyeong'|'simsa', kind='kinda'|'kindb'|'kindc'."""
+        conf = CASE_SERVICES[svc]
+        root = self._call(conf["base"], conf["codes"][kind], "serviceKey",  # type: ignore[index]
                           {"pageNo": 1, "numOfRows": 1000})
         return [r[kind] for r in _items(root) if r.get(kind)]
 
-    def jilbyeong_count(self, kinda: str = "", kindb: str = "", kindc: str = "",
-                        tq: str = "", cq: str = "") -> int:
-        """조건에 맞는 질병판정서 건수."""
-        root = self._call(JILBYEONG_BASE, "getJilbyeongYuhyeongByCountPstate", "serviceKey",
+    def case_count(self, svc: str, kinda: str = "", kindb: str = "", kindc: str = "",
+                   tq: str = "", cq: str = "") -> int:
+        """조건에 맞는 결정서 건수."""
+        conf = CASE_SERVICES[svc]
+        root = self._call(conf["base"], conf["count"], "serviceKey",  # type: ignore[arg-type]
                           {"kinda": kinda, "kindb": kindb, "kindc": kindc, "tq": tq, "cq": cq,
                            "pageNo": 1, "numOfRows": 1})
         text = root.findtext(".//cnt")
         return int(text) if text and text.isdigit() else 0
 
-    def jilbyeong_page(self, page: int, size: int, kinda: str = "", kindb: str = "",
-                       kindc: str = "", tq: str = "", cq: str = "") -> tuple[int, list[dict[str, str]]]:
-        """질병판정서 한 페이지(총건수, 항목 목록). 본문 검색어가 있으면 내용 조회, 업종명만 있으면 업종명 조회."""
+    def case_page(self, svc: str, page: int, size: int, kinda: str = "", kindb: str = "",
+                  kindc: str = "", tq: str = "", cq: str = "") -> tuple[int, list[dict[str, str]]]:
+        """결정서 한 페이지(총건수, 항목 목록). 본문 검색어가 있으면 내용 조회, 제목 검색어만 있으면 제목 조회."""
+        conf = CASE_SERVICES[svc]
         common = {"kinda": kinda, "kindb": kindb, "kindc": kindc, "pageNo": page, "numOfRows": size}
         if tq and not cq:
-            root = self._call(JILBYEONG_BASE, "getJilbyeongResultEopjongPstate", "serviceKey",
+            root = self._call(conf["base"], conf["title_op"], "serviceKey",  # type: ignore[arg-type]
                               {**common, "tq": tq})
         else:
-            root = self._call(JILBYEONG_BASE, "getJilbyeongResultNaeyongPstate", "serviceKey",
+            root = self._call(conf["base"], conf["content_op"], "serviceKey",  # type: ignore[arg-type]
                               {**common, "cq": cq})
         return _total(root), _items(root)
+
+    # 이전 이름(질병판정서 전용) 유지
+    def jilbyeong_codes(self, kind: str) -> list[str]:
+        """질병판정서 분류 코드 목록(kinda=심의결과, kindb=직종유형, kindc=질병구분)."""
+        return self.case_codes("jilbyeong", kind)
+
+    def jilbyeong_count(self, **kw: str) -> int:
+        """조건에 맞는 질병판정서 건수."""
+        return self.case_count("jilbyeong", **kw)
+
+    def jilbyeong_page(self, page: int, size: int, **kw: str) -> tuple[int, list[dict[str, str]]]:
+        """질병판정서 한 페이지."""
+        return self.case_page("jilbyeong", page, size, **kw)
 
     # ── 산재 판례 ─────────────────────────────────────────
     def precedent_codes(self, kind: str) -> list[str]:

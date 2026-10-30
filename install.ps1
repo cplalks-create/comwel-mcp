@@ -29,7 +29,7 @@ function Ask-YesNo($question, $default = $true) {
 }
 
 Write-Host '================================================================'
-Write-Host ' 근로복지공단 산재판례·업무상질병판정서 MCP (comwel-mcp) 설치'
+Write-Host ' 근로복지공단 산재판례·질병판정서·심사결정서 MCP (comwel-mcp) 설치'
 Write-Host '================================================================'
 
 # ① 파이썬 찾기 ------------------------------------------------------------
@@ -74,7 +74,7 @@ if (-not $useExisting) {
     $existing = $key
 }
 $env:DATA_GO_KR_KEY = $existing
-Write-Host '  두 API에 키가 등록되어 있는지 확인합니다...'
+Write-Host '  세 API에 키가 등록되어 있는지 확인합니다...'
 & $Py -X utf8 (Join-Path $Root 'src\check_key.py')
 if ($LASTEXITCODE -ne 0) { Stop-Install '인증키 확인에 실패했습니다. 위 안내를 확인한 뒤 다시 실행해 주세요.' }
 Write-Ok '인증키 확인'

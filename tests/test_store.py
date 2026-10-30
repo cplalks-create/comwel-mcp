@@ -65,6 +65,36 @@ def test_jilbyeong_cache(store: Store) -> None:
     assert store.get_jilbyeong("1") is None
 
 
+def test_review_decision_cache_is_separate(store: Store) -> None:
+    """심사결정서는 판정서와 따로 보관된다(같은 번호여도 섞이지 않음)."""
+    store.save_cases("simsa", [{"accnum": "20170006029", "kinda": "기각", "kindb": "최초요양",
+                                "kindc": "법리해석", "title": "진폐 요양급여 등 부지급 처분 취소 청구",
+                                "noncontent": "청구인의 심사청구를 기각한다."}])
+    assert store.get_case("simsa", "20170006029")["kindb"] == "최초요양"
+    assert store.get_case("jilbyeong", "20170006029") is None
+    with pytest.raises(ValueError):
+        store.get_case("precedent; DROP TABLE meta", "1")
+
+
+def test_forbidden_api_gives_clear_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    """활용신청하지 않은 API(403)는 재시도 없이 '활용신청 확인' 안내를 낸다."""
+    import urllib.error
+    import urllib.request
+
+    import api_client
+
+    calls = []
+
+    def fake_urlopen(url: str, timeout: int = 0) -> None:
+        calls.append(url)
+        raise urllib.error.HTTPError(url, 403, "Forbidden", None, None)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(ComwelApiError, match="활용신청"):
+        api_client.ComwelClient("TESTKEY").case_codes("simsa", "kinda")
+    assert len(calls) == 1
+
+
 class FakeClient:
     """판례 API 흉내(쪽마다 정해진 건수)."""
 

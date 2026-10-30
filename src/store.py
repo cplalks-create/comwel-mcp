@@ -41,11 +41,28 @@ CREATE TABLE IF NOT EXISTS jilbyeong (
     compact TEXT,
     fetched_at TEXT
 );
+CREATE TABLE IF NOT EXISTS simsa (
+    accnum TEXT PRIMARY KEY,
+    kinda TEXT,
+    kindb TEXT,
+    kindc TEXT,
+    title TEXT,
+    content TEXT,
+    compact TEXT,
+    fetched_at TEXT
+);
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT
 );
 """
+
+
+def _case_table(svc: str) -> str:
+    """결정서 종류 → 표 이름(정해진 값만 허용)."""
+    if svc not in ("jilbyeong", "simsa"):
+        raise ValueError(f"알 수 없는 결정서 종류: {svc}")
+    return svc
 
 
 def now_text() -> str:
@@ -148,12 +165,13 @@ class Store:
             "SELECT * FROM precedent WHERE instr(replace(accnum, ' ', ''), ?) > 0", (key,)
         ).fetchall()]
 
-    # ── 질병판정서 ─────────────────────────────────────────
-    def save_jilbyeong(self, rows: Iterable[dict[str, str]]) -> None:
-        """받아 본 질병판정서를 보관(같은 사건번호는 새로 덮어씀)."""
+    # ── 결정서류(질병판정서·심사결정서) ─────────────────────
+    def save_cases(self, svc: str, rows: Iterable[dict[str, str]]) -> None:
+        """받아 본 결정서를 보관(같은 사건번호는 새로 덮어씀). svc='jilbyeong'|'simsa'."""
+        table = _case_table(svc)
         stamp = now_text()
         self.db.executemany(
-            "INSERT OR REPLACE INTO jilbyeong(accnum, kinda, kindb, kindc, title, content, compact, fetched_at)"
+            f"INSERT OR REPLACE INTO {table}(accnum, kinda, kindb, kindc, title, content, compact, fetched_at)"
             " VALUES(?,?,?,?,?,?,?,?)",
             [(r.get("accnum", ""), r.get("kinda", ""), r.get("kindb", ""), r.get("kindc", ""),
               r.get("title", ""), r.get("noncontent", ""), compact(r.get("noncontent", "")), stamp)
@@ -161,10 +179,18 @@ class Store:
         )
         self.db.commit()
 
-    def get_jilbyeong(self, accnum: str) -> sqlite3.Row | None:
-        """사건번호로 보관된 질병판정서 찾기."""
-        return self.db.execute("SELECT * FROM jilbyeong WHERE accnum = ?",
+    def get_case(self, svc: str, accnum: str) -> sqlite3.Row | None:
+        """사건번호로 보관된 결정서 찾기."""
+        return self.db.execute(f"SELECT * FROM {_case_table(svc)} WHERE accnum = ?",
                                (compact(accnum),)).fetchone()
+
+    def save_jilbyeong(self, rows: Iterable[dict[str, str]]) -> None:
+        """받아 본 질병판정서 보관(이전 이름)."""
+        self.save_cases("jilbyeong", rows)
+
+    def get_jilbyeong(self, accnum: str) -> sqlite3.Row | None:
+        """보관된 질병판정서 찾기(이전 이름)."""
+        return self.get_case("jilbyeong", accnum)
 
     # ── 분류 코드 캐시 ──────────────────────────────────────
     def cached_codes(self, key: str, loader: Callable[[], list[str]]) -> list[str]:

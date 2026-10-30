@@ -26,8 +26,15 @@ CALLS = [
                       "quote": "원고의 항소를 인용한다."}),
     ("verify_quote", {"source": "판정서", "case_number": "__FIRST_JIL__",
                       "quote": "__JIL_QUOTE__"}),
+    ("search_review_decisions", {"keywords": "출퇴근", "result": "취소", "size": 2}),
+    ("search_review_decisions", {"keywords": "폐암 석면", "size": 2}),
+    ("search_review_decisions", {"case_name": "평균임금", "issue": "법리해석", "size": 1}),
+    ("get_review_decision", {"case_number": "__FIRST_SIMSA__"}),
+    ("verify_quote", {"source": "심사결정서", "case_number": "__FIRST_SIMSA__",
+                      "quote": "청구인의 심사청구를 기각한다."}),
     ("list_codes", {"source": "판례"}),
     ("list_codes", {"source": "판정서"}),
+    ("list_codes", {"source": "심사결정서"}),
 ]
 
 
@@ -39,20 +46,22 @@ def text_of(result) -> str:
 async def main() -> int:
     """서버를 띄워 도구를 차례로 부른다."""
     params = StdioServerParameters(command=sys.executable, args=["-X", "utf8", str(SERVER)])
-    first_jil, jil_quote = "", ""
+    first_jil, jil_quote, first_simsa = "", "", ""
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
             tools = await session.list_tools()
             print("도구 목록:", [t.name for t in tools.tools])
             for name, args in CALLS:
-                args = {k: (first_jil if v == "__FIRST_JIL__" else jil_quote if v == "__JIL_QUOTE__" else v)
-                        for k, v in args.items()}
+                swap = {"__FIRST_JIL__": first_jil, "__JIL_QUOTE__": jil_quote, "__FIRST_SIMSA__": first_simsa}
+                args = {k: swap.get(v, v) if isinstance(v, str) else v for k, v in args.items()}
                 res = await session.call_tool(name, args)
                 out = text_of(res)
+                import re
                 if name == "search_disease_rulings" and not first_jil:
-                    import re
                     first_jil = re.search(r"판정위 사건번호 (\d+)", out).group(1)
+                if name == "search_review_decisions" and not first_simsa:
+                    first_simsa = re.search(r"심사사건번호 (\d+)", out).group(1)
                 if name == "get_disease_ruling":
                     body = out.split("\n\n", 1)[1]
                     jil_quote = body.strip().splitlines()[1][:60]

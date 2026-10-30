@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""인증키가 두 API에 모두 등록되어 있는지 확인한다(설치 파일에서 사용).
+"""인증키가 세 API에 모두 등록되어 있는지 확인한다(설치 파일에서 사용).
 
 실행:
     py -X utf8 src/check_key.py
@@ -13,10 +13,11 @@ from api_client import ComwelApiError, ComwelClient
 
 
 def main() -> int:
-    """두 API를 한 번씩 불러 본다."""
+    """세 API를 한 번씩 불러 본다."""
     client = ComwelClient()
     ok = True
-    for name, call in (("질병판정서 조회 서비스", lambda: client.jilbyeong_codes("kinda")),
+    for name, call in (("질병판정서 조회 서비스", lambda: client.case_codes("jilbyeong", "kinda")),
+                       ("심사결정서 조회 서비스", lambda: client.case_codes("simsa", "kinda")),
                        ("산재보험 판례 판결문 조회 서비스", lambda: client.precedent_codes("kinda"))):
         try:
             codes = call()
