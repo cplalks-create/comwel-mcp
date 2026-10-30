@@ -97,13 +97,7 @@ Claude가 [설치 지침서](INSTALL_FOR_CLAUDE.md)를 읽고 아래 일을 순�
 설치가 끝나면 **새 대화(새 세션)를 열어** 위 사용 예처럼 질문해 보세요.
 Claude 데스크톱 앱의 **채팅**에서도 쓰고 싶으면 설치할 때 Claude에게 "채팅에서도 쓰게 해 줘"라고 하세요.
 
-<details>
-<summary>예비 방법: 설치 파일(install.bat)로 설치</summary>
-
-Claude Code를 쓰지 않는 경우에만 씁니다. 이 페이지의 **[Code] → [Download ZIP]** 으로 받아 옮기지 않을 위치에 압축을 풀고,
-`install.bat` 을 더블클릭합니다("Windows의 PC 보호" 창이 뜨면 [추가 정보] → [실행]).
-인증키 입력 → 패키지 설치 → 판례 내려받기 → Claude 데스크톱 앱·Claude Code 등록까지 차례로 진행합니다. 끝나면 Claude를 완전히 종료했다가 다시 켭니다.
-</details>
+> Claude Code를 쓰지 않는다면 문서 끝의 [부록: Claude Code 없이 설치하기](#부록-claude-code-없이-설치하기)를 보세요.
 
 ## 관리
 
@@ -143,7 +137,19 @@ Claude Code를 쓰지 않는 경우에만 씁니다. 이 페이지의 **[Code] �
 | Claude에서 도구가 안 보임 | 새 대화(새 세션)를 열기. 데스크톱 앱 채팅이라면 앱을 트레이에서 완전히 종료한 뒤 다시 켜기 |
 | "판례 보관본이 아직 없습니다" | Claude를 다시 켜면 자동으로 받습니다(1~2분). 바로 받으려면 Claude에게 "판례 보관본 지금 업데이트해 줘" |
 
-## Mac·Linux (수동 설치)
+## 부록: Claude Code 없이 설치하기
+
+평소에는 위 [설치 방법](#설치-방법-windows--claude에게-맡기기)대로 Claude Code에게 맡기면 됩니다.
+아래는 Claude Code를 쓰지 않는 경우의 예비 방법입니다.
+
+### Windows — 설치 파일(install.bat)
+
+1. 이 페이지의 **[Code] → [Download ZIP]** 으로 받아, 앞으로 옮기지 않을 위치(예: `C:\tools\comwel-mcp`)에 압축을 풉니다.
+2. `install.bat` 을 더블클릭합니다. "Windows의 PC 보호" 창이 뜨면 [추가 정보] → [실행]을 누릅니다.
+3. 안내에 따라 인증키를 붙여넣습니다(`*`로 가려짐). 패키지 설치 → 인증키 확인 → 판례 내려받기 → Claude 데스크톱 앱·Claude Code 등록이 차례로 진행됩니다.
+4. 끝나면 Claude를 완전히 종료했다가 다시 켭니다.
+
+### Mac·Linux — 수동 설치
 
 ```bash
 python3 -m pip install -r requirements.txt
@@ -182,7 +188,7 @@ py -X utf8 tests/live_check.py      # 실제 서버·실제 MCP 연결 점검(�
 
 | 날짜 | 내용 | 기존 사용자가 할 일 |
 |---|---|---|
-| 2026. 10. 30. | **설치 방식 변경** — 설치 파일 대신 Claude Code에 문장 하나를 붙여넣어 설치(INSTALL_FOR_CLAUDE.md). install.bat은 예비용으로 유지 | 할 일 없음 |
+| 2026. 10. 30. | **설치 방식 변경** — 설치 파일 대신 Claude Code에 문장 하나를 붙여넣어 설치(INSTALL_FOR_CLAUDE.md). install.bat은 [부록](#부록-claude-code-없이-설치하기)의 예비 방법으로 옮김 | 할 일 없음 |
 | 2026. 10. 30. | **판례 보관본 자동 갱신** — Claude를 켤 때 7일마다 건수 확인, 바뀌었으면(또는 30일마다) 뒤에서 다시 받음. 갱신 기록 도구 `precedent_update_log` 추가 | [새 버전으로 업데이트](#관리)만 하면 됨 |
 | 2026. 10. 30. | **심사결정서(산재 심사청구) 검색 추가** — `search_review_decisions`, `get_review_decision` | 공공데이터포털에서 [심사결정서 조회 서비스](https://www.data.go.kr/data/15110818/openapi.do) **활용신청** 후 [새 버전으로 업데이트](#관리) |
 | 2026. 10. 30. | 첫 공개 — 질병판정서·산재 판례 검색, 인용 대조, Windows 설치 파일 | — |
