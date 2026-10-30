@@ -81,8 +81,10 @@ class Store:
             data_dir.mkdir(parents=True, exist_ok=True)
             path = data_dir / "comwel.sqlite"
         self.path = str(path)
-        self.db = sqlite3.connect(self.path, check_same_thread=False)
+        self.db = sqlite3.connect(self.path, check_same_thread=False, timeout=60)
         self.db.row_factory = sqlite3.Row
+        # WAL: 판례를 통째로 다시 받는 동안에도 다른 연결(검색)은 기존 자료를 계속 읽을 수 있다
+        self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(SCHEMA)
         self.db.commit()
 
@@ -123,7 +125,15 @@ class Store:
         except Exception:
             cur.execute("ROLLBACK")
             raise
+        self.checkpoint()
         return n
+
+    def checkpoint(self) -> None:
+        """갱신 때 생긴 임시 파일(-wal, 약 500MB)을 본 파일에 합치고 비운다."""
+        try:
+            self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except sqlite3.OperationalError:
+            pass  # 다른 연결이 읽는 중이면 다음 기회에 정리됨
 
     def search_precedents(self, includes: list[str], excludes: list[str], kinda: str = "",
                           kindb: str = "", kindc: str = "", court: str = "", title: str = "",

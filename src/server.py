@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sys
 from collections import OrderedDict
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -16,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mcp.server.mcpserver import MCPServer  # noqa: E402
 from pydantic import Field  # noqa: E402
 
+import auto_update  # noqa: E402
 from api_client import ComwelApiError, ComwelClient  # noqa: E402
 from search import compact, matches, parse_query, snippets  # noqa: E402
 from search import verify_quote as check_quote  # noqa: E402
@@ -55,6 +57,7 @@ INSTRUCTIONS = """근로복지공단 공개 자료 3종을 조회한다.
 - 심사결정서: 공단 산재보험 심사청구(소송 전 불복 단계) 결정서(공개 3,000건). 공단 서버에서 바로 검색한다.
   공개분은 사건번호가 모두 2017로 시작하는 2017년 무렵 사건 표본이다. 최근 경향으로 일반화하지 않는다.
 - 산재 판례: 근로복지공단이 당사자인 산재 소송 판결문(약 3만 5천 건). PC 보관본에서 검색한다.
+  보관본은 Claude를 켤 때 7일마다 자동으로 확인해 바뀌었으면(또는 30일마다) 다시 받는다. 사용자에게 수동 갱신을 권할 필요 없다.
 (산재보험재심사위원회 재결·행정심판 재결은 korean-law MCP의 search_decisions(domain='iaciac'·'admin_appeal')로 찾는다.)
 
 인용 원칙(할루시네이션 방지):
@@ -280,11 +283,14 @@ def _fmt_precedent(no: int, r: dict[str, str], terms: list[str]) -> str:
 
 
 def _precedent_status() -> str:
-    """판례 보관본 상태 한 줄."""
+    """판례 보관본 상태(기준일 + 자동 갱신 상태)."""
     info = _store.get_meta("precedent_sync")
-    if not info:
-        return "판례 보관본이 아직 없습니다. update_precedents 를 먼저 실행해 주세요."
-    return f"판례 보관본 기준: {info['at']} 내려받음, {info['count']:,}건"
+    if not info or _store.precedent_count() == 0:
+        if auto_update.lock_for(_store).is_locked():
+            return "판례 보관본을 처음 받는 중입니다(1~2분). 잠시 뒤 다시 검색해 주세요."
+        return "판례 보관본이 아직 없습니다. update_precedents 를 실행해 주세요."
+    return (f"판례 보관본 기준: {info['at']} 내려받음, {info['count']:,}건\n"
+            f"{auto_update.status_text(_store)}")
 
 
 @mcp.tool()
@@ -433,14 +439,37 @@ def list_codes(
 
 @mcp.tool()
 def update_precedents() -> str:
-    """산재 판례 PC 보관본을 공단 서버의 최신 자료로 통째로 새로 받는다(1~2분 걸림). 처음 한 번과, 새 판례가 필요할 때 실행."""
+    """산재 판례 PC 보관본을 지금 바로 공단 서버의 최신 자료로 통째로 새로 받는다(1~2분 걸림).
+
+    평소에는 필요 없다 — Claude를 켤 때 7일마다 자동으로 확인하고, 바뀌었으면(또는 30일마다) 자동으로 다시 받는다.
+    """
+    lock = auto_update.lock_for(_store)
+    if not lock.acquire():
+        return "자동 갱신이 이미 진행 중입니다(1~2분). 그동안 검색은 기존 보관본으로 계속됩니다."
     try:
         before = _store.precedent_count()
         info = sync_precedents(_client, _store)
+        auto_update.record(_store, datetime.now(), "sync", f"수동 갱신 → {info['count']:,}건")
     except ComwelApiError as exc:
-        return f"갱신 실패: {exc}"
+        return f"갱신 실패(기존 보관본 유지): {exc}"
+    finally:
+        lock.release()
     return f"판례 보관본 갱신 완료: {info['count']:,}건 (이전 {before:,}건, {info['at']})"
 
 
+@mcp.tool()
+def precedent_update_log() -> str:
+    """판례 보관본 자동 갱신 기록(최근 30건)과 현재 상태를 보여 준다."""
+    history = _store.get_meta("precedent_check_log", [])
+    lines = ["## 판례 보관본 갱신 기록", _precedent_status(), ""]
+    if not history:
+        lines.append("아직 자동 확인 기록이 없습니다.")
+    for h in reversed(history):
+        lines.append(f"- {h.get('at')} | {h.get('action')} | {h.get('reason')}")
+    lines.append("\n(action: sync=다시 받음, none=확인만 함(변경 없음), error=실패 후 기존 보관본 유지)")
+    return "\n".join(lines)
+
+
 if __name__ == "__main__":
+    auto_update.start_background(_store.path)
     mcp.run()

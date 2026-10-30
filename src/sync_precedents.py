@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import math
 import sys
+from datetime import datetime
 from typing import Callable
 
 from api_client import ComwelApiError, ComwelClient
@@ -39,7 +40,8 @@ def sync_precedents(client: ComwelClient, store: Store,
             f"판례를 다 받지 못했습니다(받은 {len(rows):,}건 / 총 {total:,}건). 기존 보관본을 그대로 둡니다."
         )
     saved = store.replace_precedents(rows)
-    info = {"at": now_text(), "count": saved, "api_total": total}
+    info = {"at": now_text(), "ts": datetime.now().isoformat(timespec="seconds"),
+            "count": saved, "api_total": total}
     store.set_meta("precedent_sync", info)
     return info
 
