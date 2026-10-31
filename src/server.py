@@ -19,6 +19,7 @@ from pydantic import Field  # noqa: E402
 
 import auto_update  # noqa: E402
 import pdf_export  # noqa: E402
+import update_check  # noqa: E402
 from api_client import ComwelApiError, ComwelClient  # noqa: E402
 from pdf_export import PdfError  # noqa: E402
 from search import compact, matches, parse_query, snippets  # noqa: E402
@@ -79,12 +80,24 @@ INSTRUCTIONS = """근로복지공단 공개 자료 3종을 조회한다.
 - 심사결정서는 공개 화면이 없어 API 원문을 그대로 옮긴 '원문 출력본'으로 저장한다.
 - 어느 경우든 공단이 발급한 공식 문서(정본·등본)가 아니라 '공개 자료 출력본'이라는 점을 사용자에게 알린다.
   제출처(노동위원회·공단·법원)에서 증거로 받아들이는지는 사용자가 판단할 일이다.
+
+새 버전 알림:
+- 결과 끝에 [comwel 업데이트 알림]이 붙어 있으면 사용자에게 한 줄로 전한다. 설치는 사용자가 원할 때만,
+  저장소의 INSTALL_FOR_CLAUDE.md 업데이트 절차로 한다(묻지 않고 설치하지 말 것). 바뀐 내용은 check_update 로 확인한다.
 """
 
 mcp = MCPServer(name="comwel", instructions=INSTRUCTIONS)
 _client = ComwelClient()
 _store = Store()
 _scan_cache: OrderedDict[tuple, tuple[list[dict[str, str]], bool, int]] = OrderedDict()
+
+
+def _update_notice() -> str:
+    """새 버전 알림 한 줄(없으면 빈 문자열). 알림 확인 문제로 검색이 실패하면 안 됨."""
+    try:
+        return update_check.notice(_store)
+    except Exception:
+        return ""
 
 
 def _clamp(size: int, page: int) -> tuple[int, int]:
@@ -185,6 +198,8 @@ def _search_cases(svc: str, keywords: str, title_q: str, filters: dict[str, str]
         tail.append("※ 공개 심사결정서는 2017년 접수 사건 중 일부 구간(사건번호 20170006001~20170009097, 3,000건)뿐입니다. "
                     "2018년 이후 사건은 없으니 최근 경향으로 일반화하지 마세요. "
                     "최근 사례는 공단 홈페이지 [실무자료]의 연도별 「심사결정사례집」(PDF)에서 확인할 수 있습니다.")
+    if _update_notice():
+        tail.append(_update_notice())
     return "\n\n".join(["\n".join(head), *body, "\n".join(tail)])
 
 
@@ -384,6 +399,8 @@ def search_precedents(
     if not rows:
         body = ["검색 결과가 없습니다."]
     tail = f"\n{SOURCE_PAN}\n{_precedent_status()}\n선고일은 get_precedent 로 확인하세요(짐작 금지). 인용 전 verify_quote(source='판례', ...)로 대조하세요."
+    if _update_notice():
+        tail += "\n" + _update_notice()
     return "\n\n".join([head, *body, tail])
 
 
@@ -639,6 +656,16 @@ def save_pdf(
 
 
 @mcp.tool()
+def check_update() -> str:
+    """comwel 프로그램의 새 버전이 있는지 GitHub에서 지금 확인하고, 바뀐 내용과 설치 방법을 보여 준다(설치는 하지 않음).
+
+    설치는 사용자가 원할 때 저장소의 INSTALL_FOR_CLAUDE.md 업데이트 절차로 한다.
+    """
+    update_check.check(_store, force=True)
+    return "## comwel 버전 확인\n" + update_check.status_text(_store)
+
+
+@mcp.tool()
 def update_precedents() -> str:
     """산재 판례 PC 보관본을 지금 바로 공단 서버의 최신 자료로 통째로 새로 받는다(1~2분 걸림).
 
@@ -673,4 +700,5 @@ def precedent_update_log() -> str:
 
 if __name__ == "__main__":
     auto_update.start_background(_store.path)
+    update_check.start_background(_store.path)
     mcp.run()
