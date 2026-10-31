@@ -52,7 +52,7 @@ if (-not $Py) {
 Write-Ok "파이썬: $Py"
 
 # ② 패키지 설치 ------------------------------------------------------------
-Write-Step 2 '필요한 패키지 설치(mcp, pydantic)'
+Write-Step 2 '필요한 패키지 설치(mcp, pydantic, pypdf)'
 & $Py -m pip install --disable-pip-version-check -q -r (Join-Path $Root 'requirements.txt')
 if ($LASTEXITCODE -ne 0) { Stop-Install '패키지 설치에 실패했습니다. 인터넷 연결을 확인해 주세요.' }
 Write-Ok '패키지 설치'

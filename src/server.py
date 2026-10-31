@@ -18,7 +18,9 @@ from mcp.server.mcpserver import MCPServer  # noqa: E402
 from pydantic import Field  # noqa: E402
 
 import auto_update  # noqa: E402
+import pdf_export  # noqa: E402
 from api_client import ComwelApiError, ComwelClient  # noqa: E402
+from pdf_export import PdfError  # noqa: E402
 from search import compact, matches, parse_query, snippets  # noqa: E402
 from search import verify_quote as check_quote  # noqa: E402
 from store import Store  # noqa: E402
@@ -65,9 +67,18 @@ INSTRUCTIONS = """근로복지공단 공개 자료 3종을 조회한다.
 인용 원칙(할루시네이션 방지):
 1. 판정서·결정서·판결문 문장을 인용할 때는 먼저 verify_quote 로 원문과 글자 대조를 하고, 일치한 문장만 따옴표로 인용한다.
    요약·재구성한 내용은 인용부호 없이 '취지'로만 쓴다.
-2. 판례에는 선고일이, 판정서·심사결정서에는 결정일 칸이 없다. 날짜를 짐작해 쓰지 말고 본문에 적힌 날짜만 쓰거나 따로 확인한다.
+2. API 결과에는 날짜 칸이 없다. 판정서의 공식 판정번호·판정일, 판례의 재판부·선고일은 get_disease_ruling·get_precedent 가
+   근로복지공단 공개 사이트에서 확인해 보여 준다. 서면에는 그 값만 쓰고, 확인되지 않으면 '확인 필요'로 둔다(짐작 금지).
+   심사결정서는 공개 사이트가 없어 결정일을 확인할 수 없다(본문에 적힌 날짜만 쓸 것).
 3. 공개 질병판정서에는 정신질환·자해(자살) 사건이 거의 없다(각 2건 수준). 이 분야는 '공개 자료 없음'으로 보고한다.
 4. 원문에 ○○○ 등으로 가려진 개인정보는 추측해 채우지 않는다.
+
+근거자료 PDF:
+- 사용자가 판정서·판결문을 사건 근거자료로 PDF 저장하길 원하면 save_pdf 를 쓴다(사건 폴더 경로를 folder 로 넘기면 그 폴더에 저장).
+- 질병판정서·판례는 공단 공개 사이트의 [프린트] 화면을 그대로 PDF로 저장한다. 모든 쪽 아래에 출력 일시·원본 주소·쪽 번호가 찍힌다.
+- 심사결정서는 공개 화면이 없어 API 원문을 그대로 옮긴 '원문 출력본'으로 저장한다.
+- 어느 경우든 공단이 발급한 공식 문서(정본·등본)가 아니라 '공개 자료 출력본'이라는 점을 사용자에게 알린다.
+  제출처(노동위원회·공단·법원)에서 증거로 받아들이는지는 사용자가 판단할 일이다.
 """
 
 mcp = MCPServer(name="comwel", instructions=INSTRUCTIONS)
@@ -184,16 +195,58 @@ def _get_case(svc: str, case_number: str) -> str:
     if not row:
         return (f"{c['number']} {case_number} {c['name']}가 보관본에 없습니다. "
                 f"공단 API는 사건번호로 직접 찾는 기능이 없으니, {c['search_tool']} 로 먼저 검색해 주세요.")
+    site_lines: list[str] = []
+    if svc == "jilbyeong":
+        meta = _jil_site_meta(row["accnum"])
+        if meta:
+            site_lines = [f"- 공식 판정번호: {meta.get('official_no') or '확인 필요'} | 판정일: {meta.get('decided_on') or '확인 필요'}"
+                          f" (근로복지공단 공개 사이트 확인)",
+                          f"- 공단 화면: {meta.get('url')}"]
+        else:
+            site_lines = ["- 판정번호·판정일: 공단 공개 사이트에서 확인하지 못함(확인 필요)"]
+    else:
+        site_lines = ["- 결정일: 공개 사이트가 없어 확인 불가(본문에 적힌 날짜만 사용)"]
     return "\n".join([
         f"## {c['name']} 전문 — {c['number']} {row['accnum']}",
         f"- {c['kinda']}: {row['kinda']} | {c['kindc']}: {row['kindc']} | "
         f"{c['kindb']}: {row['kindb']} | {c['title']}: {row['title']}",
+        *site_lines,
         f"- 받은 시각: {row['fetched_at']}",
         "",
         row["content"],
         "",
         c["source"],
+        "근거자료 PDF가 필요하면 save_pdf 로 저장할 수 있습니다.",
     ])
+
+
+def _jil_site_meta(case_number: str) -> dict | None:
+    """질병판정서 판정번호·판정일(공단 공개 사이트, 한 번 받으면 보관)."""
+    cached = _store.get_site_meta("판정서", case_number)
+    if cached:
+        return cached
+    try:
+        meta = pdf_export.jil_meta(case_number)
+    except PdfError:
+        return None
+    if meta:
+        _store.set_site_meta("판정서", case_number, meta)
+    return meta
+
+
+def _pan_site_meta(case_number: str, court: str) -> dict | None:
+    """판례 재판부·선고일(공단 공개 사이트, 한 번 받으면 보관)."""
+    key = f"{case_number}_{court}"
+    cached = _store.get_site_meta("판례", key)
+    if cached:
+        return cached
+    try:
+        meta = pdf_export.pan_meta(case_number, court)
+    except PdfError:
+        return None
+    if meta:
+        _store.set_site_meta("판례", key, meta)
+    return meta
 
 
 def _find_case_for_quote(svc: str, case_number: str, quote: str) -> dict[str, str] | None:
@@ -229,7 +282,7 @@ def search_disease_rulings(
 
     결과마다 판정위 사건번호·심의결과·질병구분·직종·업종(산재보험 사업종류)과 검색어 주변 원문 발췌를 보여 준다.
     전문은 get_disease_ruling, 인용 전 대조는 verify_quote 로 한다.
-    ※ 판정서에는 판정 날짜 칸이 없다(본문 속 신청일 등으로만 짐작 가능 — 판정일로 단정하지 말 것).
+    ※ 검색 결과에는 판정일이 없다. 공식 판정번호·판정일은 get_disease_ruling 이 공단 공개 사이트에서 확인해 보여 준다.
     """
     return _search_cases("jilbyeong", keywords, industry,
                          {"kinda": result, "kindb": job_type, "kindc": disease}, page, size)
@@ -312,7 +365,9 @@ def search_precedents(
 
     결과마다 법원·사건번호·사건명·판결결과와 검색어 주변 원문 발췌를 보여 준다.
     ※ 판결결과는 '근로복지공단 처분에 대한' 결과다(기각 = 대개 근로자 패소, 취소 = 대개 근로자 승소).
-    ※ API에 선고일이 없으므로 선고일은 따로 확인해야 한다.
+      단, 사업주가 원고로 공단의 승인을 다툰 사건(사건명 '요양결정처분취소' 등, 근로자는 피고보조참가인)은 '취소'가 근로자 패소다.
+      판결 의미를 말하기 전에 원고가 누구인지 전문에서 확인할 것.
+    ※ 검색 결과에는 선고일이 없다. 재판부·선고일은 get_precedent 가 공단 공개 사이트에서 확인해 보여 준다.
     """
     if _store.precedent_count() == 0:
         return _precedent_status()
@@ -328,7 +383,7 @@ def search_precedents(
     body = [_fmt_precedent((page - 1) * size + i + 1, dict(r), includes) for i, r in enumerate(rows)]
     if not rows:
         body = ["검색 결과가 없습니다."]
-    tail = f"\n{SOURCE_PAN}\n{_precedent_status()}\n선고일은 API에 없습니다(짐작 금지). 인용 전 verify_quote(source='판례', ...)로 대조하세요."
+    tail = f"\n{SOURCE_PAN}\n{_precedent_status()}\n선고일은 get_precedent 로 확인하세요(짐작 금지). 인용 전 verify_quote(source='판례', ...)로 대조하세요."
     return "\n\n".join([head, *body, tail])
 
 
@@ -344,9 +399,16 @@ def get_precedent(
         return f"사건번호 {case_number} 판결문이 보관본에 없습니다. search_precedents 로 찾아 주세요."
     parts = []
     for r in rows:
+        meta = _pan_site_meta(r["accnum"], r["courtname"])
+        if meta:
+            site = (f"- 재판부: {meta.get('division') or '확인 필요'} | 판결선고: {meta.get('decided_on') or '확인 필요'}"
+                    f" | 변론종결: {meta.get('closed_on') or '-'} (근로복지공단 공개 사이트 확인)\n- 공단 화면: {meta.get('url')}")
+        else:
+            site = "- 선고일: 공단 공개 사이트에서 확인하지 못함(확인 필요)"
         parts.append("\n".join([
             f"## {r['courtname']} {r['accnum']} {r['title']}",
-            f"- 판결결과: {r['kinda']} | 사건유형: {r['kindb']} | 구분: {r['kindc']} | 선고일: API 미제공(확인 필요)",
+            f"- 판결결과: {r['kinda']} | 사건유형: {r['kindb']} | 구분: {r['kindc']}",
+            site,
             "",
             r["content"] if len(compact(r["content"])) >= 50
             else f"(판결문 본문이 공개되지 않았습니다 — 취하 등으로 판결문이 없는 사건일 수 있음)\n{r['content']}",
@@ -439,6 +501,141 @@ def list_codes(
         return "\n".join(lines)
     except ComwelApiError as exc:
         return f"조회 실패: {exc}"
+
+
+MAX_PDF = 20
+
+
+def _save_jil_pdf(no: str, folder) -> str:
+    """질병판정서 1건 저장. 결과 한 줄."""
+    row = _store.get_case("jilbyeong", no)
+    meta = _jil_site_meta(no)
+    kinda = row["kinda"] if row else ""
+    disease = pdf_export.first_disease(row["content"][:600]) if row else ""
+    if meta:
+        stem = pdf_export.safe_name("질병판정서", meta.get("official_no") or no, kinda, disease)
+        path = pdf_export.unique_path(folder, stem)
+        _, print_url = pdf_export.jil_urls(no)
+        pdf_export.print_to_pdf(print_url, path)
+        ok = pdf_export.pdf_contains(path, meta.get("official_no") or "업무상질병판정서")
+        if ok is False:
+            path.unlink(missing_ok=True)
+            raise PdfError("출력된 PDF에서 판정번호를 확인하지 못해 저장을 취소했습니다(공단 화면 구조 변경 가능).")
+        return (f"[공단 화면 출력] {path}\n   판정번호 {meta.get('official_no')} · 판정일 {meta.get('decided_on')} · "
+                f"원본 {meta.get('url')}")
+    if not row:
+        raise PdfError("공단 사이트에서도, 보관본에서도 찾지 못했습니다. 판정위 사건번호를 확인하거나 search_disease_rulings 로 먼저 검색해 주세요.")
+    stem = pdf_export.safe_name("질병판정서", no, kinda, disease, "원문출력본")
+    path = pdf_export.unique_path(folder, stem)
+    when = pdf_export.now_text()
+    pdf_export.text_pdf(
+        "업무상질병판정서(원문 출력본)",
+        [("판정위 사건번호", no), ("심의결과", row["kinda"]), ("질병구분", row["kindc"]), ("직종", row["kindb"]),
+         ("업종", row["title"]), ("판정일", "공단 공개 사이트에서 확인하지 못함"),
+         ("출처", "근로복지공단 「질병판정서 조회 서비스」(공공데이터포털 OpenAPI)"), ("출력 일시", when)],
+        row["content"], path, f"질병판정서 {no} · 공공데이터 원문 출력본 · 출력 {when}")
+    return f"[원문 출력본 — 공단 사이트에서 찾지 못함] {path}"
+
+
+def _save_pan_pdfs(no: str, court: str, folder) -> list[str]:
+    """판례 저장(같은 번호가 여러 법원이면 모두, court 를 주면 그 법원만)."""
+    rows = [r for r in _store.get_precedents(no) if not court or court.strip() in r["courtname"]]
+    if not rows:
+        raise PdfError("판례 보관본에서 찾지 못했습니다. search_precedents 로 사건번호와 법원명을 확인해 주세요.")
+    out = []
+    for r in rows:
+        meta = _pan_site_meta(r["accnum"], r["courtname"])
+        if meta:
+            stem = pdf_export.safe_name("판례", r["courtname"], r["accnum"], r["kinda"], r["title"])
+            path = pdf_export.unique_path(folder, stem)
+            _, print_url = pdf_export.pan_urls(r["accnum"], r["courtname"])
+            pdf_export.print_to_pdf(print_url, path)
+            ok = pdf_export.pdf_contains(path, r["accnum"].replace("(", "").split(")")[-1])
+            if ok is False:
+                path.unlink(missing_ok=True)
+                raise PdfError("출력된 PDF에서 사건번호를 확인하지 못해 저장을 취소했습니다(공단 화면 구조 변경 가능).")
+            out.append(f"[공단 화면 출력] {path}\n   {meta.get('division')} · 판결선고 {meta.get('decided_on')} · 원본 {meta.get('url')}")
+        else:
+            stem = pdf_export.safe_name("판례", r["courtname"], r["accnum"], r["kinda"], r["title"], "원문출력본")
+            path = pdf_export.unique_path(folder, stem)
+            when = pdf_export.now_text()
+            pdf_export.text_pdf(
+                f"{r['courtname']} {r['accnum']} 판결(원문 출력본)",
+                [("법원", r["courtname"]), ("사건번호", r["accnum"]), ("사건명", r["title"]), ("판결결과", r["kinda"]),
+                 ("선고일", "공단 공개 사이트에서 확인하지 못함"),
+                 ("출처", "근로복지공단 「산재보험 판례 판결문 조회 서비스」(공공데이터포털 OpenAPI)"), ("출력 일시", when)],
+                r["content"], path, f"{r['courtname']} {r['accnum']} · 공공데이터 원문 출력본 · 출력 {when}")
+            out.append(f"[원문 출력본 — 공단 사이트에서 찾지 못함] {path}")
+        pdf_export.pause()
+    return out
+
+
+def _save_simsa_pdf(no: str, folder) -> str:
+    """심사결정서 1건 원문 출력본."""
+    row = _store.get_case("simsa", no)
+    if not row:
+        raise PdfError("보관본에 없습니다. search_review_decisions 로 먼저 검색한 결정서만 저장할 수 있습니다.")
+    stem = pdf_export.safe_name("심사결정서", no, row["kinda"], row["title"], "원문출력본")
+    path = pdf_export.unique_path(folder, stem)
+    when = pdf_export.now_text()
+    pdf_export.text_pdf(
+        "산재보험 심사결정서(원문 출력본)",
+        [("심사사건번호", no), ("심사결과", row["kinda"]), ("청구유형", row["kindb"]), ("쟁점유형", row["kindc"]),
+         ("사건명", row["title"]), ("결정일", "공개 자료에 없음(본문에 적힌 날짜 참고)"),
+         ("출처", "근로복지공단 「심사결정서 조회 서비스」(공공데이터포털 OpenAPI)"), ("출력 일시", when)],
+        row["content"], path, f"심사결정서 {no} · 공공데이터 원문 출력본 · 출력 {when}")
+    return f"[원문 출력본] {path}"
+
+
+@mcp.tool()
+def save_pdf(
+    source: Annotated[Literal["판정서", "판례", "심사결정서"], Field(description="'판정서'(질병판정서), '판례', '심사결정서' 중 하나")],
+    case_numbers: Annotated[list[str], Field(description="저장할 사건번호 목록(최대 20건). 판정서는 판정위 사건번호, 판례는 사건번호, 심사결정서는 심사사건번호")],
+    folder: Annotated[str, Field(description="저장할 폴더의 전체 경로(예: 사건 폴더). 비우면 내 문서\\comwel_PDF")] = "",
+    court: Annotated[str, Field(description="판례만: 같은 사건번호가 여러 법원에 있을 때 법원명 일부(예: 서울행정법원). 비우면 모두 저장")] = "",
+) -> str:
+    """판정서·판결문·심사결정서를 사건 근거자료용 PDF로 저장한다.
+
+    - 질병판정서·판례: 근로복지공단 공개 사이트의 [프린트] 화면을 그대로 PDF로 저장(공단 양식, 공식 판정번호·판정일/선고일 포함,
+      모든 쪽 아래에 출력 일시·원본 주소·쪽 번호 자동 표기). PC의 Edge 또는 Chrome을 화면 없이 실행해 인쇄한다.
+    - 심사결정서: 공개 화면이 없어 API 원문을 그대로 옮긴 '원문 출력본'으로 저장.
+    - 공단 사이트에서 찾지 못하면 보관본의 API 원문으로 '원문 출력본'을 만든다(파일 이름에 '원문출력본' 표시).
+    ※ 공단이 발급한 공식 문서(정본·등본)가 아니라 공개 자료 출력본이다. 사용자에게 이 점을 알릴 것.
+    """
+    nos = [n.strip() for n in case_numbers if n and n.strip()]
+    if not nos:
+        return "저장할 사건번호를 넣어 주세요."
+    if len(nos) > MAX_PDF:
+        return f"한 번에 최대 {MAX_PDF}건까지 저장합니다(공단 사이트 부담 방지). 나눠서 요청해 주세요."
+    folder_path = pdf_export.resolve_folder(folder)
+    try:
+        folder_path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return f"저장 폴더를 만들 수 없습니다: {folder_path} ({exc})"
+    lines = [f"## PDF 저장 결과 — {source} {len(nos)}건 → {folder_path}"]
+    ok_count = 0
+    for i, no in enumerate(nos):
+        try:
+            if source == "판정서":
+                lines.append(f"- {no}: {_save_jil_pdf(no, folder_path)}")
+                ok_count += 1
+            elif source == "판례":
+                for line in _save_pan_pdfs(no, court, folder_path):
+                    lines.append(f"- {no}: {line}")
+                    ok_count += 1
+            else:
+                lines.append(f"- {no}: {_save_simsa_pdf(no, folder_path)}")
+                ok_count += 1
+        except PdfError as exc:
+            lines.append(f"- {no}: [실패] {exc}")
+            if "찾지 못했습니다" in str(exc) and "Edge" in str(exc):
+                break
+        if source != "판례" and i < len(nos) - 1:
+            pdf_export.pause()
+    lines.append(f"\n저장 {ok_count}건.")
+    lines.append("※ 공단이 발급한 공식 문서가 아니라 공개 자료 출력본입니다. 공단 화면 출력본은 모든 쪽 아래에 출력 일시·원본 주소가 찍혀 있습니다.")
+    lines.append("※ 브라우저를 찾지 못하면: 공단 화면 주소를 열어 [프린트] → 'PDF로 저장'으로 직접 저장할 수 있습니다.")
+    return "\n".join(lines)
 
 
 @mcp.tool()

@@ -51,6 +51,13 @@ CREATE TABLE IF NOT EXISTS simsa (
     compact TEXT,
     fetched_at TEXT
 );
+CREATE TABLE IF NOT EXISTS site_meta (
+    source TEXT,
+    case_key TEXT,
+    value TEXT,
+    fetched_at TEXT,
+    PRIMARY KEY (source, case_key)
+);
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT
@@ -201,6 +208,19 @@ class Store:
     def get_jilbyeong(self, accnum: str) -> sqlite3.Row | None:
         """보관된 질병판정서 찾기(이전 이름)."""
         return self.get_case("jilbyeong", accnum)
+
+    # ── 공단 사이트 정보(판정번호·판정일·선고일 등) ─────────────
+    def get_site_meta(self, source: str, case_key: str) -> dict | None:
+        """보관된 공단 사이트 정보."""
+        row = self.db.execute("SELECT value FROM site_meta WHERE source=? AND case_key=?",
+                              (source, case_key)).fetchone()
+        return json.loads(row["value"]) if row else None
+
+    def set_site_meta(self, source: str, case_key: str, value: dict) -> None:
+        """공단 사이트 정보 보관."""
+        self.db.execute("INSERT OR REPLACE INTO site_meta(source, case_key, value, fetched_at) VALUES(?,?,?,?)",
+                        (source, case_key, json.dumps(value, ensure_ascii=False), now_text()))
+        self.db.commit()
 
     # ── 분류 코드 캐시 ──────────────────────────────────────
     def cached_codes(self, key: str, loader: Callable[[], list[str]]) -> list[str]:
