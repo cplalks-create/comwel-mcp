@@ -108,12 +108,29 @@ def _request(url: str) -> ET.Element:
     # 인증키 오류 등은 별도 형식으로 온다
     if root.tag == "OpenAPI_ServiceResponse":
         msg = root.findtext(".//returnAuthMsg") or root.findtext(".//errMsg") or "알 수 없는 오류"
-        code = root.findtext(".//returnReasonCode") or ""
-        raise ComwelApiError(f"공공데이터포털 오류({code}): {msg}")
-    result_code = root.findtext("./header/resultCode")
+        code = (root.findtext(".//returnReasonCode") or "").strip()
+        raise ComwelApiError(f"공공데이터포털 오류({code}): {msg}{error_hint(code)}")
+    result_code = (root.findtext("./header/resultCode") or "").strip() or None
     if result_code not in (None, "00"):
-        raise ComwelApiError(f"API 오류({result_code}): {root.findtext('./header/resultMsg')}")
+        raise ComwelApiError(
+            f"API 오류({result_code}): {root.findtext('./header/resultMsg')}{error_hint(result_code)}")
     return root
+
+
+# 공공데이터포털 공통 오류 코드 가운데 사용자가 조치할 수 있는 것
+ERROR_HINTS = {
+    "20": "이 API의 활용신청이 되어 있는지 확인해 주세요.",
+    "22": "오늘 호출 한도(API마다 하루 10,000번)를 넘었습니다. 내일 다시 시도해 주세요.",
+    "30": "공공데이터포털에서 이 API를 활용신청했는지, 일반 인증키(Decoding)를 저장했는지 확인해 주세요. "
+          "신청 직후에는 반영까지 최대 1시간 걸릴 수 있습니다.",
+    "31": "인증키 활용기간이 끝났습니다. 공공데이터포털 마이페이지에서 활용기간을 연장해 주세요.",
+}
+
+
+def error_hint(code: str | None) -> str:
+    """오류 코드에 맞는 조치 안내(없으면 빈 문자열)."""
+    hint = ERROR_HINTS.get((code or "").strip().lstrip("0") or "0")
+    return f" → {hint}" if hint else ""
 
 
 def _items(root: ET.Element) -> list[dict[str, str]]:
@@ -186,19 +203,6 @@ class ComwelClient:
             root = self._call(conf["base"], conf["content_op"], "serviceKey",  # type: ignore[arg-type]
                               {**common, "cq": cq})
         return _total(root), _items(root)
-
-    # 이전 이름(질병판정서 전용) 유지
-    def jilbyeong_codes(self, kind: str) -> list[str]:
-        """질병판정서 분류 코드 목록(kinda=심의결과, kindb=직종유형, kindc=질병구분)."""
-        return self.case_codes("jilbyeong", kind)
-
-    def jilbyeong_count(self, **kw: str) -> int:
-        """조건에 맞는 질병판정서 건수."""
-        return self.case_count("jilbyeong", **kw)
-
-    def jilbyeong_page(self, page: int, size: int, **kw: str) -> tuple[int, list[dict[str, str]]]:
-        """질병판정서 한 페이지."""
-        return self.case_page("jilbyeong", page, size, **kw)
 
     # ── 산재 판례 ─────────────────────────────────────────
     def precedent_codes(self, kind: str) -> list[str]:

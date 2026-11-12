@@ -56,13 +56,53 @@ def test_get_precedent_with_branch_prefix(store: Store) -> None:
     assert store.get_precedents("2099누1") == []
 
 
+def test_get_precedent_does_not_match_partial_number(store: Store) -> None:
+    """번호의 일부만 넣으면 다른 사건이므로 찾아 주지 않는다(엉뚱한 판결에 인용 대조되는 것 방지)."""
+    store.replace_precedents(ROWS + [
+        {"accnum": "2014구단360", "courtname": "부산지방법원", "noncontent": "가"},
+        {"accnum": "2014구단3603", "courtname": "서울행정법원", "noncontent": "나"},
+        {"accnum": "사건2024구합55136", "courtname": "서울행정법원", "noncontent": "다"},
+        {"accnum": "2014구단360", "courtname": "서울행정법원", "noncontent": "라"},
+    ])
+    assert store.get_precedents("2014구단36") == []
+    assert store.get_precedents("2018누1070") == []
+    assert store.get_precedents("14구단360") == []
+    assert sorted(r["courtname"] for r in store.get_precedents("2014구단360")) == ["부산지방법원", "서울행정법원"]
+    # 앞머리('사건', '(창원)')는 있든 없든 같은 사건
+    assert store.get_precedents("2024구합55136")[0]["accnum"] == "사건2024구합55136"
+    assert store.get_precedents("사건 2018누10708")[0]["accnum"] == "(창원)2018누10708"
+
+
+def test_replace_is_isolated_from_shared_connection(store: Store) -> None:
+    """판례를 바꾸는 도중에도 평소 연결의 검색은 기존 자료를 보고, 실패하면 기존 자료가 그대로 남는다."""
+    seen: list[int] = []
+
+    def rows():
+        yield {"accnum": "새1", "noncontent": "새 본문"}
+        seen.append(store.precedent_count())                    # 갱신 도중 다른 도구의 검색
+        seen.append(store.search_precedents(["폐암"], [])[0])
+        raise RuntimeError("내려받기 실패")
+
+    with pytest.raises(RuntimeError):
+        store.replace_precedents(rows())
+    assert seen == [3, 1]
+    assert store.precedent_count() == 3
+    assert store.get_precedents("새1") == []
+
+
+def test_replace_success_then_visible(store: Store) -> None:
+    """성공하면 평소 연결에서 새 자료가 보인다."""
+    assert store.replace_precedents([{"accnum": "2020두1", "noncontent": "새"}]) == 1
+    assert store.precedent_count() == 1
+
+
 def test_jilbyeong_cache(store: Store) -> None:
     """받아 본 판정서 보관·조회."""
-    store.save_jilbyeong([{"accnum": "240020210001542", "kinda": "인정", "kindb": "주방장 및 조리사",
-                           "kindc": "뇌혈관질환", "title": "중식요리점", "noncontent": "주문 ..."}])
-    row = store.get_jilbyeong(" 240020210001542 ")
+    store.save_cases("jilbyeong", [{"accnum": "240020210001542", "kinda": "인정", "kindb": "주방장 및 조리사",
+                                    "kindc": "뇌혈관질환", "title": "중식요리점", "noncontent": "주문 ..."}])
+    row = store.get_case("jilbyeong", " 240020210001542 ")
     assert row is not None and row["kinda"] == "인정"
-    assert store.get_jilbyeong("1") is None
+    assert store.get_case("jilbyeong", "1") is None
 
 
 def test_review_decision_cache_is_separate(store: Store) -> None:
@@ -138,3 +178,27 @@ def test_sync_keeps_old_data_when_incomplete(store: Store) -> None:
     with pytest.raises(ComwelApiError):
         sync_precedents(FakeClient(2500, 2400), store)
     assert store.precedent_count() == 3
+
+
+def test_quota_error_has_korean_hint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """하루 호출 한도 초과(코드 22) 같은 포털 오류에는 조치 안내를 붙인다."""
+    import io
+    import urllib.request
+
+    import api_client
+
+    body = ("<OpenAPI_ServiceResponse><cmmMsgHeader><errMsg>SERVICE ERROR</errMsg>"
+            "<returnAuthMsg>LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR</returnAuthMsg>"
+            "<returnReasonCode>22</returnReasonCode></cmmMsgHeader></OpenAPI_ServiceResponse>").encode()
+
+    class Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda url, timeout=0: Resp(body))
+    with pytest.raises(ComwelApiError, match="한도"):
+        api_client.ComwelClient("TESTKEY").case_count("jilbyeong", cq="폐암")
+    assert api_client.error_hint("00") == "" and api_client.error_hint(None) == ""

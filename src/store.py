@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -72,6 +73,11 @@ def _case_table(svc: str) -> str:
     return svc
 
 
+def case_core(accnum: str) -> str:
+    """사건번호에서 공백과 앞머리(숫자가 아닌 글자: '사건', '(창원)' 등)를 뗀 몸통. 예: '(창원)2018누10708' → '2018누10708'."""
+    return re.sub(r"^[^0-9]+", "", compact(accnum))
+
+
 def now_text() -> str:
     """현재 시각(YYYY. M. D. HH:MM 형식)."""
     n = datetime.now()
@@ -113,25 +119,32 @@ class Store:
         return int(self.db.execute("SELECT COUNT(*) FROM precedent").fetchone()[0])
 
     def replace_precedents(self, rows: Iterable[dict[str, str]]) -> int:
-        """판례 전체를 새 자료로 바꾼다(한 번에 바꿔서, 중간에 실패해도 기존 자료는 남음)."""
-        cur = self.db.cursor()
+        """판례 전체를 새 자료로 바꾼다(한 번에 바꿔서, 중간에 실패해도 기존 자료는 남음).
+
+        이 저장소의 평소 연결(self.db)이 아니라 **전용 연결**에서 처리한다. 평소 연결은 여러 도구 호출이 함께 쓰므로,
+        거기서 바꾸면 갱신 도중의 검색이 반쯤 바뀐 자료를 보거나 다른 저장(commit)이 끼어들어 일부만 확정될 수 있다.
+        """
+        conn = sqlite3.connect(self.path, timeout=60, isolation_level=None)
         try:
-            cur.execute("BEGIN")
-            cur.execute("DELETE FROM precedent")
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("DELETE FROM precedent")
             n = 0
             for r in rows:
                 content = r.get("noncontent", "")
-                cur.execute(
+                conn.execute(
                     "INSERT INTO precedent(accnum, courtname, title, kinda, kindb, kindc, content, compact)"
                     " VALUES(?,?,?,?,?,?,?,?)",
                     (r.get("accnum", ""), r.get("courtname", ""), r.get("title", ""), r.get("kinda", ""),
                      r.get("kindb", ""), r.get("kindc", ""), content, compact(content)),
                 )
                 n += 1
-            cur.execute("COMMIT")
-        except Exception:
-            cur.execute("ROLLBACK")
+            conn.execute("COMMIT")
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
             raise
+        finally:
+            conn.close()
         self.checkpoint()
         return n
 
@@ -172,15 +185,22 @@ class Store:
         return total, rows
 
     def get_precedents(self, accnum: str) -> list[sqlite3.Row]:
-        """사건번호로 판례 찾기(공백 무시, 같은 번호가 여럿이면 모두)."""
-        key = compact(accnum)
+        """사건번호로 판례 찾기(공백 무시, 같은 번호가 여러 법원에 있으면 모두).
+
+        보관본의 사건번호는 '(창원)2018누10708', '사건2024구합55136' 처럼 앞머리가 붙은 것이 있다.
+        그래서 앞머리(숫자가 아닌 글자)만 다른 경우까지 같은 사건으로 본다. 번호의 일부만 넣은 것
+        (예: '2014구단36' → '2014구단360')은 다른 사건이므로 찾아 주지 않는다.
+        """
         rows = self.db.execute("SELECT * FROM precedent WHERE accnum = ?", (accnum.strip(),)).fetchall()
         if rows:
             return rows
-        # '(창원)2018누10708' 처럼 앞에 지원명이 붙은 번호도 찾도록 부분 일치로 한 번 더
-        return [r for r in self.db.execute(
-            "SELECT * FROM precedent WHERE instr(replace(accnum, ' ', ''), ?) > 0", (key,)
-        ).fetchall()]
+        core = case_core(accnum)
+        if not core:
+            return []
+        like = "%" + core.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        candidates = self.db.execute(
+            "SELECT * FROM precedent WHERE replace(accnum, ' ', '') LIKE ? ESCAPE '\\'", (like,)).fetchall()
+        return [r for r in candidates if case_core(r["accnum"]) == core]
 
     # ── 결정서류(질병판정서·심사결정서) ─────────────────────
     def save_cases(self, svc: str, rows: Iterable[dict[str, str]]) -> None:
@@ -200,14 +220,6 @@ class Store:
         """사건번호로 보관된 결정서 찾기."""
         return self.db.execute(f"SELECT * FROM {_case_table(svc)} WHERE accnum = ?",
                                (compact(accnum),)).fetchone()
-
-    def save_jilbyeong(self, rows: Iterable[dict[str, str]]) -> None:
-        """받아 본 질병판정서 보관(이전 이름)."""
-        self.save_cases("jilbyeong", rows)
-
-    def get_jilbyeong(self, accnum: str) -> sqlite3.Row | None:
-        """보관된 질병판정서 찾기(이전 이름)."""
-        return self.get_case("jilbyeong", accnum)
 
     # ── 공단 사이트 정보(판정번호·판정일·선고일 등) ─────────────
     def get_site_meta(self, source: str, case_key: str) -> dict | None:
