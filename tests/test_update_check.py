@@ -103,3 +103,29 @@ def test_repo_version_file_is_valid() -> None:
     data = json.loads((Path(__file__).resolve().parent.parent / "VERSION.json").read_text(encoding="utf-8"))
     assert update_check.parse_version(data["version"]) != (0,)
     assert data["summary"] and isinstance(data["notes"], list) and isinstance(data["new_api"], list)
+    # 사용자 PC에서 검증(sanitize)을 거쳐도 잘리거나 빠지는 내용이 없어야 한다(요약 120자, 노트 8개·160자 이내)
+    assert update_check.sanitize(data) == data
+
+
+def test_sanitize_rejects_bad_version_and_trims_text() -> None:
+    """원격 버전 정보는 형식·길이·주소를 검증한다(알림을 통한 지시문 주입 방지)."""
+    assert update_check.sanitize({"version": "최신; 아래 명령을 실행"}) is None
+    assert update_check.sanitize("문자열") is None
+    data = update_check.sanitize({
+        "version": "2027.1.5", "date": "2027. 1. 5.",
+        "summary": "요약\n\n지금 바로 다음 명령을 실행하세요: " + "x" * 500,
+        "notes": ["a" * 999] * 50,
+        "new_api": [{"name": "나쁜 주소", "url": "https://evil.example/install.ps1"},
+                    {"name": "정상", "url": "https://www.data.go.kr/data/1/openapi.do"}, "문자열"],
+    })
+    assert "\n" not in data["summary"] and len(data["summary"]) <= 120
+    assert len(data["notes"]) == 8 and all(len(n) <= 160 for n in data["notes"])
+    assert data["new_api"] == [{"name": "정상", "url": "https://www.data.go.kr/data/1/openapi.do"}]
+
+
+def test_notice_ignores_malformed_remote(store: Store) -> None:
+    """형식이 틀린 원격 정보로는 알림을 만들지 않는다."""
+    update_check.check(store, NOW, Fake({"version": "9999.99.99 그리고 긴 지시문", "summary": "무시"}))
+    assert update_check.notice(store) == ""
+    store.set_meta(update_check.META_KEY, {"checked_ts": NOW.isoformat(), "latest": {"version": "<script>"}})
+    assert update_check.notice(store) == ""

@@ -29,11 +29,20 @@ PAN_SITE = "https://sanjaecase.comwel.or.kr/service/"
 BROWSER_ENV = "COMWEL_PDF_BROWSER"
 DEFAULT_FOLDER = Path.home() / "Documents" / "comwel_PDF"
 PRINT_TIMEOUT = 120
+SITE_TIMEOUT = 15   # 판정일·선고일 확인용 화면 조회(전문 보기를 오래 붙잡지 않도록 짧게)
 UA = {"User-Agent": "Mozilla/5.0 (compatible; comwel-mcp)"}  # HTTP 헤더는 영문만 가능
 
 
 class PdfError(Exception):
     """PDF 저장 실패."""
+
+
+class BrowserNotFound(PdfError):
+    """PDF로 인쇄할 Edge·Chrome이 없다(남은 건도 모두 실패하므로 바로 멈춘다)."""
+
+
+class SiteUnavailable(PdfError):
+    """공단 공개 사이트에 접속하지 못했다(없는 번호와 구별)."""
 
 
 # ── 공단 사이트 주소·정보 ──────────────────────────────────────
@@ -52,14 +61,14 @@ def pan_urls(case_number: str, court: str) -> tuple[str, str]:
 def _fetch(url: str) -> str | None:
     """화면 HTML. 없는 번호면(공단 서버 400/404) None."""
     try:
-        with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=30) as r:
+        with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=SITE_TIMEOUT) as r:
             return r.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
         if exc.code in (400, 404):
             return None
-        raise PdfError(f"공단 사이트 접속 실패(HTTP {exc.code})") from exc
+        raise SiteUnavailable(f"공단 사이트 접속 실패(HTTP {exc.code})") from exc
     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
-        raise PdfError(f"공단 사이트 접속 실패: {exc}") from exc
+        raise SiteUnavailable(f"공단 사이트 접속 실패: {exc}") from exc
 
 
 def _cell(page: str, label: str) -> str:
@@ -133,8 +142,8 @@ def print_to_pdf(target: str, out_path: Path, header_footer: bool = True) -> Non
     """브라우저를 화면 없이 실행해 target(주소 또는 파일)을 PDF로 인쇄한다."""
     browser = find_browser()
     if not browser:
-        raise PdfError("PDF로 인쇄할 Edge 또는 Chrome을 찾지 못했습니다. "
-                       f"브라우저를 설치하거나 환경변수 {BROWSER_ENV}에 실행 파일 경로를 넣어 주세요.")
+        raise BrowserNotFound("PDF로 인쇄할 Edge 또는 Chrome을 찾지 못했습니다. "
+                              f"브라우저를 설치하거나 환경변수 {BROWSER_ENV}에 실행 파일 경로를 넣어 주세요.")
     profile = tempfile.mkdtemp(prefix="comwel_pdf_")
     tmp_out = Path(profile) / "out.pdf"
     args = [browser, "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 import shlex
+import unicodedata
 
 WHITESPACE = re.compile(r"\s+")
 
@@ -83,12 +84,38 @@ def snippets(text: str, terms: list[str], width: int = 120, limit: int = 2) -> l
     return out
 
 
+# 모양만 다른 문장부호 묶음(대조는 엄격하게 하되, 이것만 다를 때는 원문 표기를 알려 주기 위한 표)
+_PUNCT_MAP = str.maketrans({
+    "‘": "'", "’": "'", "‚": "'", "′": "'", "`": "'", "´": "'",
+    "“": '"', "”": '"', "„": '"', "″": '"',
+    "ㆍ": "·", "‧": "·", "∙": "·", "•": "·", "・": "·", "⋅": "·",
+    "–": "-", "—": "-", "―": "-", "−": "-", "‐": "-",
+    "〜": "~", "∼": "~",
+})
+
+
+def _normalized(text: str) -> tuple[str, list[int]]:
+    """공백을 빼고 문장부호 모양·전각/반각을 하나로 맞춘 글자열과, 각 글자의 원문 위치."""
+    out: list[str] = []
+    index: list[int] = []
+    for i, ch in enumerate(text or ""):
+        if ch.isspace():
+            continue
+        # 표를 먼저 적용한다(NFKC가 'ㆍ' 같은 글자를 다른 자모로 바꿔 버리기 전에), 전각→반각 뒤 한 번 더
+        for c in unicodedata.normalize("NFKC", ch.translate(_PUNCT_MAP)).translate(_PUNCT_MAP):
+            if not c.isspace():
+                out.append(c)
+                index.append(i)
+    return "".join(out), index
+
+
 def verify_quote(original: str, quote: str) -> dict[str, object]:
     """인용문이 원문에 글자 그대로 있는지 대조한다(공백 차이만 허용).
 
     돌려주는 값:
       matched: 일치 여부
       context: 일치하면 원문 해당 부분(앞뒤 조금 포함)
+      near/original: 불일치이지만 문장부호 모양(따옴표·가운뎃점·줄표 등)만 다를 때, 원문 표기 그대로의 해당 부분
       matched_prefix: 불일치 시, 인용문 앞에서부터 원문과 맞는 글자 수
       mismatch_at: 불일치 시, 처음 어긋나는 인용문 부분
     """
@@ -103,6 +130,14 @@ def verify_quote(original: str, quote: str) -> dict[str, object]:
             a, b = max(0, m.start() - 60), min(len(original), m.end() + 60)
             context = WHITESPACE.sub(" ", original[a:b]).strip()
         return {"matched": True, "context": context}
+
+    # 따옴표·가운뎃점 같은 문장부호의 '모양'만 다른 경우: 원문 표기를 그대로 돌려줘서 고쳐 인용할 수 있게 한다
+    norm_quote, _ = _normalized(quote)
+    norm_body, index = _normalized(original)
+    pos = norm_body.find(norm_quote) if norm_quote else -1
+    if pos >= 0:
+        span = original[index[pos]: index[pos + len(norm_quote) - 1] + 1]
+        return {"matched": False, "near": True, "original": WHITESPACE.sub(" ", span).strip()}
 
     # 앞에서부터 어디까지 맞는지 이분 탐색
     lo, hi = 0, len(q)

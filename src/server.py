@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
@@ -15,13 +16,14 @@ from typing import Annotated, Literal
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from mcp.server.mcpserver import MCPServer  # noqa: E402
+from mcp.types import ToolAnnotations  # noqa: E402
 from pydantic import Field  # noqa: E402
 
 import auto_update  # noqa: E402
 import pdf_export  # noqa: E402
 import update_check  # noqa: E402
 from api_client import ComwelApiError, ComwelClient  # noqa: E402
-from pdf_export import PdfError  # noqa: E402
+from pdf_export import BrowserNotFound, PdfError, SiteUnavailable  # noqa: E402
 from search import compact, matches, parse_query, snippets  # noqa: E402
 from search import verify_quote as check_quote  # noqa: E402
 from store import Store  # noqa: E402
@@ -30,6 +32,7 @@ from sync_precedents import sync_precedents  # noqa: E402
 SCAN_LIMIT = 3000          # 여러 단어 검색 시 공단 서버에서 훑어 오는 최대 건수
 SCAN_PAGE = 1000
 MAX_SIZE = 50
+MAX_PDF = 20               # save_pdf 한 번에 저장하는 최대 건수(공단 사이트 부담 방지)
 SOURCE_PAN = "출처: 근로복지공단 「산재보험 판례 판결문 조회 서비스」(공공데이터포털 OpenAPI), PC 보관본"
 
 # 결정서류(공단 서버 실시간 조회) 종류별 표시 정보
@@ -90,6 +93,16 @@ mcp = MCPServer(name="comwel", instructions=INSTRUCTIONS)
 _client = ComwelClient()
 _store = Store()
 _scan_cache: OrderedDict[tuple, tuple[list[dict[str, str]], bool, int]] = OrderedDict()
+_scan_lock = threading.Lock()   # Claude가 도구를 동시에 여러 개 부르면 서로 다른 스레드에서 실행된다
+
+
+def _tool(title: str, read_only: bool = True):
+    """도구 등록. 결과는 일반 글로 돌려주고({"result": ...}로 싸지 않음), 읽기 전용 여부를 Claude에 알린다.
+
+    검색·열람 도구는 PC의 보관본(캐시)만 채울 뿐 사용자 파일을 바꾸지 않으므로 읽기 전용으로 표시한다.
+    """
+    return mcp.tool(title=title, structured_output=False,
+                    annotations=ToolAnnotations(title=title, read_only_hint=read_only, destructive_hint=False))
 
 
 def _update_notice() -> str:
@@ -126,9 +139,10 @@ def _scan_cases(svc: str, includes: list[str], excludes: list[str], title_q: str
     돌려주는 값: (걸러진 결과, 일부만 훑었는지, 훑은 건수)
     """
     key = (svc, tuple(includes), tuple(excludes), title_q, tuple(sorted(filters.items())))
-    if key in _scan_cache:
-        _scan_cache.move_to_end(key)
-        return _scan_cache[key]
+    with _scan_lock:
+        if key in _scan_cache:
+            _scan_cache.move_to_end(key)
+            return _scan_cache[key]
 
     if includes:
         counts = {t: _client.case_count(svc, cq=t, tq=title_q, **filters) for t in includes}
@@ -153,9 +167,10 @@ def _scan_cases(svc: str, includes: list[str], excludes: list[str], title_q: str
     ]
     _store.save_cases(svc, result)
     value = (result, partial, len(collected))
-    _scan_cache[key] = value
-    if len(_scan_cache) > 5:
-        _scan_cache.popitem(last=False)
+    with _scan_lock:
+        _scan_cache[key] = value
+        if len(_scan_cache) > 5:
+            _scan_cache.popitem(last=False)
     return value
 
 
@@ -212,13 +227,13 @@ def _get_case(svc: str, case_number: str) -> str:
                 f"공단 API는 사건번호로 직접 찾는 기능이 없으니, {c['search_tool']} 로 먼저 검색해 주세요.")
     site_lines: list[str] = []
     if svc == "jilbyeong":
-        meta = _jil_site_meta(row["accnum"])
+        meta, site_error = _jil_site_meta(row["accnum"])
         if meta:
             site_lines = [f"- 공식 판정번호: {meta.get('official_no') or '확인 필요'} | 판정일: {meta.get('decided_on') or '확인 필요'}"
                           f" (근로복지공단 공개 사이트 확인)",
                           f"- 공단 화면: {meta.get('url')}"]
         else:
-            site_lines = ["- 판정번호·판정일: 공단 공개 사이트에서 확인하지 못함(확인 필요)"]
+            site_lines = [f"- 판정번호·판정일: 공단 공개 사이트에서 확인하지 못함(확인 필요){_why(site_error)}"]
     else:
         site_lines = ["- 결정일: 공개 사이트가 없어 확인 불가(본문에 적힌 날짜만 사용)"]
     return "\n".join([
@@ -235,33 +250,36 @@ def _get_case(svc: str, case_number: str) -> str:
     ])
 
 
-def _jil_site_meta(case_number: str) -> dict | None:
-    """질병판정서 판정번호·판정일(공단 공개 사이트, 한 번 받으면 보관)."""
-    cached = _store.get_site_meta("판정서", case_number)
+def _site_meta(kind: str, key: str, loader) -> tuple[dict | None, str]:
+    """공단 공개 사이트 정보(한 번 받으면 보관). (정보, 접속 오류 문구)를 돌려준다.
+
+    정보가 None 이고 오류 문구가 비어 있으면 '사이트에 그 번호가 없음', 오류 문구가 있으면 '접속하지 못함'이다.
+    """
+    cached = _store.get_site_meta(kind, key)
     if cached:
-        return cached
+        return cached, ""
     try:
-        meta = pdf_export.jil_meta(case_number)
-    except PdfError:
-        return None
+        meta = loader()
+    except SiteUnavailable as exc:
+        return None, str(exc)
     if meta:
-        _store.set_site_meta("판정서", case_number, meta)
-    return meta
+        _store.set_site_meta(kind, key, meta)
+    return meta, ""
 
 
-def _pan_site_meta(case_number: str, court: str) -> dict | None:
-    """판례 재판부·선고일(공단 공개 사이트, 한 번 받으면 보관)."""
-    key = f"{case_number}_{court}"
-    cached = _store.get_site_meta("판례", key)
-    if cached:
-        return cached
-    try:
-        meta = pdf_export.pan_meta(case_number, court)
-    except PdfError:
-        return None
-    if meta:
-        _store.set_site_meta("판례", key, meta)
-    return meta
+def _jil_site_meta(case_number: str) -> tuple[dict | None, str]:
+    """질병판정서 판정번호·판정일."""
+    return _site_meta("판정서", case_number, lambda: pdf_export.jil_meta(case_number))
+
+
+def _pan_site_meta(case_number: str, court: str) -> tuple[dict | None, str]:
+    """판례 재판부·선고일."""
+    return _site_meta("판례", f"{case_number}_{court}", lambda: pdf_export.pan_meta(case_number, court))
+
+
+def _why(site_error: str) -> str:
+    """사이트 접속 오류가 있었으면 그 사유를 덧붙인다."""
+    return f" — {site_error}. 잠시 뒤 다시 시도해 주세요" if site_error else ""
 
 
 def _find_case_for_quote(svc: str, case_number: str, quote: str) -> dict[str, str] | None:
@@ -283,7 +301,7 @@ def _find_case_for_quote(svc: str, case_number: str, quote: str) -> dict[str, st
 
 
 # ── 질병판정서 ─────────────────────────────────────────────
-@mcp.tool()
+@_tool("질병판정서 검색")
 def search_disease_rulings(
     keywords: Annotated[str, Field(description="본문 검색어. 띄어 쓴 낱말은 모두 포함(AND), \"구절\"은 한 덩어리, -낱말은 제외. 예: 조리흄 폐암 -흡연. 공단 서버는 띄어쓰기를 구분하므로 '조리흄'과 '조리 흄'처럼 두 표기를 각각 찾아볼 것")] = "",
     industry: Annotated[str, Field(description="산재보험 사업종류 이름(일부만 써도 됨). 사업장 이름이 아님. 예: 음식 및 숙박업, 국가 및 지방자치단체의 사업(학교급식 등), 건축건설공사, 보건 및 사회복지사업, 도.소매. 학교·병원 같은 사업장 성격은 keywords로 찾을 것")] = "",
@@ -303,7 +321,7 @@ def search_disease_rulings(
                          {"kinda": result, "kindb": job_type, "kindc": disease}, page, size)
 
 
-@mcp.tool()
+@_tool("질병판정서 전문 보기")
 def get_disease_ruling(
     case_number: Annotated[str, Field(description="판정위 사건번호(검색 결과에 나온 번호 그대로). 예: 240020210001542")],
 ) -> str:
@@ -312,7 +330,7 @@ def get_disease_ruling(
 
 
 # ── 심사결정서 ─────────────────────────────────────────────
-@mcp.tool()
+@_tool("심사결정서 검색")
 def search_review_decisions(
     keywords: Annotated[str, Field(description="본문 검색어. 띄어 쓴 낱말은 모두 포함(AND), \"구절\"은 한 덩어리, -낱말은 제외. 예: 출퇴근 교통사고. 공단 서버는 띄어쓰기를 구분함")] = "",
     case_name: Annotated[str, Field(description="사건명 일부. 예: 요양급여, 유족급여, 장해등급, 휴업급여, 평균임금")] = "",
@@ -334,7 +352,7 @@ def search_review_decisions(
                          {"kinda": result, "kindb": claim_type, "kindc": issue}, page, size)
 
 
-@mcp.tool()
+@_tool("심사결정서 전문 보기")
 def get_review_decision(
     case_number: Annotated[str, Field(description="심사사건번호(검색 결과에 나온 번호 그대로). 예: 20170006029")],
 ) -> str:
@@ -365,7 +383,7 @@ def _precedent_status() -> str:
             f"{auto_update.status_text(_store)}")
 
 
-@mcp.tool()
+@_tool("산재 판례 검색")
 def search_precedents(
     keywords: Annotated[str, Field(description="판결문 본문 검색어. 띄어 쓴 낱말은 모두 포함(AND), \"구절\"은 한 덩어리, -낱말은 제외. 공백 차이는 무시. 예: 조리흄 폐암")] = "",
     result: Annotated[str, Field(description="판결결과(정확히). 기각·취소·일부취소·일부기각·각하·취하·파기환송")] = "",
@@ -404,7 +422,7 @@ def search_precedents(
     return "\n\n".join([head, *body, tail])
 
 
-@mcp.tool()
+@_tool("판결문 전문 보기")
 def get_precedent(
     case_number: Annotated[str, Field(description="사건번호(검색 결과에 나온 그대로). 예: (창원)2018누10708, 2019두12345")],
 ) -> str:
@@ -416,12 +434,12 @@ def get_precedent(
         return f"사건번호 {case_number} 판결문이 보관본에 없습니다. search_precedents 로 찾아 주세요."
     parts = []
     for r in rows:
-        meta = _pan_site_meta(r["accnum"], r["courtname"])
+        meta, site_error = _pan_site_meta(r["accnum"], r["courtname"])
         if meta:
             site = (f"- 재판부: {meta.get('division') or '확인 필요'} | 판결선고: {meta.get('decided_on') or '확인 필요'}"
                     f" | 변론종결: {meta.get('closed_on') or '-'} (근로복지공단 공개 사이트 확인)\n- 공단 화면: {meta.get('url')}")
         else:
-            site = "- 선고일: 공단 공개 사이트에서 확인하지 못함(확인 필요)"
+            site = f"- 선고일: 공단 공개 사이트에서 확인하지 못함(확인 필요){_why(site_error)}"
         parts.append("\n".join([
             f"## {r['courtname']} {r['accnum']} {r['title']}",
             f"- 판결결과: {r['kinda']} | 사건유형: {r['kindb']} | 구분: {r['kindc']}",
@@ -435,7 +453,7 @@ def get_precedent(
 
 
 # ── 인용 대조·분류·갱신 ─────────────────────────────────────
-@mcp.tool()
+@_tool("인용문 원문 대조")
 def verify_quote(
     source: Annotated[Literal["판례", "판정서", "심사결정서"], Field(description="'판례', '판정서'(질병판정서), '심사결정서' 중 하나")],
     case_number: Annotated[str, Field(description="사건번호(판례) / 판정위 사건번호(판정서) / 심사사건번호(심사결정서)")],
@@ -471,6 +489,9 @@ def verify_message(text: str, quote: str) -> str:
         return f"[일치] 원문과 글자 그대로 같습니다(공백 차이만 무시). 원문 위치: …{r['context']}…"
     if "reason" in r:
         return f"[불일치] {r['reason']}"
+    if r.get("near"):
+        return (f"[불일치 — 문장부호 모양만 다름] 글자는 같지만 따옴표·가운뎃점·줄표 같은 문장부호의 모양이 원문과 다릅니다. "
+                f"원문 표기: 「{r['original']}」 — 이 표기 그대로 인용하세요.")
     return (f"[불일치] 인용문 {r['quote_length']}자 중 앞 {r['matched_prefix']}자(공백 제외)까지만 원문과 같고, "
             f"'{r['mismatch_at']}' 부분부터 다릅니다. 이 문장은 인용하지 말고 원문을 다시 확인하세요.")
 
@@ -482,7 +503,7 @@ def _codes_with_counts(svc: str, kind: str) -> list[str]:
         f"{svc}_{kind}_counts", lambda: [f"{v} {_client.case_count(svc, **{kind: v}):,}" for v in codes])
 
 
-@mcp.tool()
+@_tool("분류 값 목록")
 def list_codes(
     source: Annotated[Literal["판례", "판정서", "심사결정서"], Field(description="'판례', '판정서'(질병판정서), '심사결정서' 중 하나")],
 ) -> str:
@@ -520,13 +541,12 @@ def list_codes(
         return f"조회 실패: {exc}"
 
 
-MAX_PDF = 20
-
-
 def _save_jil_pdf(no: str, folder) -> str:
     """질병판정서 1건 저장. 결과 한 줄."""
     row = _store.get_case("jilbyeong", no)
-    meta = _jil_site_meta(no)
+    meta, site_error = _jil_site_meta(no)
+    if site_error:
+        raise SiteUnavailable(f"{site_error}. 공단 사이트가 열리는지 확인한 뒤 다시 시도해 주세요.")
     kinda = row["kinda"] if row else ""
     disease = pdf_export.first_disease(row["content"][:600]) if row else ""
     if meta:
@@ -561,7 +581,9 @@ def _save_pan_pdfs(no: str, court: str, folder) -> list[str]:
         raise PdfError("판례 보관본에서 찾지 못했습니다. search_precedents 로 사건번호와 법원명을 확인해 주세요.")
     out = []
     for r in rows:
-        meta = _pan_site_meta(r["accnum"], r["courtname"])
+        meta, site_error = _pan_site_meta(r["accnum"], r["courtname"])
+        if site_error:
+            raise SiteUnavailable(f"{site_error}. 공단 사이트가 열리는지 확인한 뒤 다시 시도해 주세요.")
         if meta:
             stem = pdf_export.safe_name("판례", r["courtname"], r["accnum"], r["kinda"], r["title"])
             path = pdf_export.unique_path(folder, stem)
@@ -604,7 +626,7 @@ def _save_simsa_pdf(no: str, folder) -> str:
     return f"[원문 출력본] {path}"
 
 
-@mcp.tool()
+@_tool("근거자료 PDF 저장", read_only=False)
 def save_pdf(
     source: Annotated[Literal["판정서", "판례", "심사결정서"], Field(description="'판정서'(질병판정서), '판례', '심사결정서' 중 하나")],
     case_numbers: Annotated[list[str], Field(description="저장할 사건번호 목록(최대 20건). 판정서는 판정위 사건번호, 판례는 사건번호, 심사결정서는 심사사건번호")],
@@ -643,10 +665,11 @@ def save_pdf(
             else:
                 lines.append(f"- {no}: {_save_simsa_pdf(no, folder_path)}")
                 ok_count += 1
+        except BrowserNotFound as exc:   # 남은 건도 모두 실패하므로 멈춘다
+            lines.append(f"- {no}: [실패] {exc}")
+            break
         except PdfError as exc:
             lines.append(f"- {no}: [실패] {exc}")
-            if "찾지 못했습니다" in str(exc) and "Edge" in str(exc):
-                break
         if source != "판례" and i < len(nos) - 1:
             pdf_export.pause()
     lines.append(f"\n저장 {ok_count}건.")
@@ -655,7 +678,7 @@ def save_pdf(
     return "\n".join(lines)
 
 
-@mcp.tool()
+@_tool("comwel 새 버전 확인")
 def check_update() -> str:
     """comwel 프로그램의 새 버전이 있는지 GitHub에서 지금 확인하고, 바뀐 내용과 설치 방법을 보여 준다(설치는 하지 않음).
 
@@ -665,7 +688,7 @@ def check_update() -> str:
     return "## comwel 버전 확인\n" + update_check.status_text(_store)
 
 
-@mcp.tool()
+@_tool("판례 보관본 지금 갱신", read_only=False)
 def update_precedents() -> str:
     """산재 판례 PC 보관본을 지금 바로 공단 서버의 최신 자료로 통째로 새로 받는다(1~2분 걸림).
 
@@ -685,7 +708,7 @@ def update_precedents() -> str:
     return f"판례 보관본 갱신 완료: {info['count']:,}건 (이전 {before:,}건, {info['at']})"
 
 
-@mcp.tool()
+@_tool("판례 갱신 기록")
 def precedent_update_log() -> str:
     """판례 보관본 자동 갱신 기록(최근 30건)과 현재 상태를 보여 준다."""
     history = _store.get_meta("precedent_check_log", [])

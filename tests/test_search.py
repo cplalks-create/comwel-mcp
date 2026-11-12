@@ -80,3 +80,24 @@ def test_snippets_without_terms_returns_head() -> None:
     """검색어가 없으면 앞부분."""
     out = snippets("짧은 본문", [])
     assert out == ["짧은 본문"]
+
+
+def test_verify_quote_near_match_returns_original_marks() -> None:
+    """따옴표 모양만 다르면 '불일치'이되 원문 표기를 돌려준다."""
+    r = verify_quote(ORIGINAL, '감정의가 "이 사건 상병은 업무로 인한')
+    assert r["matched"] is False and r["near"] is True
+    assert r["original"] == "감정의가 “이 사건 상병은 업무로 인한"
+
+
+def test_verify_quote_near_match_dots_and_fullwidth() -> None:
+    """가운뎃점(ㆍ/·)·전각 문자만 다른 경우도 원문 표기를 알려 준다."""
+    original = "무릎꿇기ㆍ쪼그리기 자세（1－2시간）가 발생함"
+    r = verify_quote(original, "무릎꿇기·쪼그리기 자세(1-2시간)가 발생함")
+    assert r["matched"] is False and r["near"] is True
+    assert r["original"] == original
+
+
+def test_verify_quote_changed_word_is_not_near() -> None:
+    """글자가 다르면 문장부호 차이로 취급하지 않는다."""
+    r = verify_quote(ORIGINAL, '감정의가 "이 사건 질병은')
+    assert r["matched"] is False and "near" not in r and "mismatch_at" in r
