@@ -1,0 +1,28 @@
+# 저장소에 올릴 때마다 단위 테스트를 자동으로 돌린다(인터넷·인증키가 필요 없는 테스트만).
+# 사용자들에게 '새 버전 알림'이 가기 전에, 올린 코드가 깨지지 않았는지 확인하려는 것.
+name: 테스트
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: 패키지 설치
+        run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
+      - name: 단위 테스트
+        run: python -X utf8 -m pytest tests/ -q
